@@ -1,121 +1,276 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import * as tf from '@tensorflow/tfjs'
+import { LABELS, UNKNOWN_SPRITE } from './labels'
 import './App.css'
 
+const MODEL_URL = '/model/my-model/model.json'
+const INPUT_SIZE = 224
+// Fraction of the (square) camera frame captured by the guide box.
+const GUIDE_FRAC = 0.75
+// How often we ask the model for a prediction.
+const PREDICT_INTERVAL_MS = 350
+
+const spriteUrl = (name) => `/pokemon/${name}.png`
+const prettyName = (name) =>
+  name
+    .split('-')
+    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+    .join(' ')
+
 function App() {
-  const [count, setCount] = useState(0)
+  const videoRef = useRef(null)
+  const captureCanvasRef = useRef(null)
+  const modelRef = useRef(null)
+  const rafRef = useRef(null)
+  const lastPredictRef = useRef(0)
+
+  const [status, setStatus] = useState('loading') // loading | ready | running | error
+  const [statusMsg, setStatusMsg] = useState('Loading model…')
+  const [threshold, setThreshold] = useState(0.6)
+  const [prediction, setPrediction] = useState(null) // { label, confidence }
+
+  // Load the TensorFlow.js graph model once.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        await tf.ready()
+        const model = await tf.loadGraphModel(MODEL_URL)
+        if (cancelled) return
+        modelRef.current = model
+        // Warm up so the first real prediction isn't slow.
+        tf.tidy(() => {
+          const warm = model.predict(tf.zeros([1, INPUT_SIZE, INPUT_SIZE, 3]))
+          if (Array.isArray(warm)) warm.forEach((t) => t.dataSync())
+          else warm.dataSync()
+        })
+        setStatus('ready')
+        setStatusMsg('Model ready. Start the camera to play!')
+      } catch (err) {
+        console.error(err)
+        setStatus('error')
+        setStatusMsg('Failed to load the model. Check the console for details.')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Draw the centered guide square of the current video frame into a 224x224
+  // canvas (cover-crop math so it matches the on-screen guide box).
+  const captureGuide = useCallback(() => {
+    const video = videoRef.current
+    const canvas = captureCanvasRef.current
+    if (!video || !canvas || video.readyState < 2) return null
+
+    const vw = video.videoWidth
+    const vh = video.videoHeight
+    if (!vw || !vh) return null
+
+    const side = Math.min(vw, vh) * GUIDE_FRAC
+    const sx = (vw - side) / 2
+    const sy = (vh - side) / 2
+
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(video, sx, sy, side, side, 0, 0, INPUT_SIZE, INPUT_SIZE)
+    return canvas
+  }, [])
+
+  const runPrediction = useCallback(() => {
+    const model = modelRef.current
+    const canvas = captureGuide()
+    if (!model || !canvas) return
+
+    const { label, confidence } = tf.tidy(() => {
+      // Model has a Rescaling layer baked in, so feed raw 0–255 pixels.
+      const input = tf.browser
+        .fromPixels(canvas)
+        .toFloat()
+        .expandDims(0)
+      const out = model.predict(input)
+      const probs = Array.isArray(out) ? out[0] : out
+      const data = probs.dataSync()
+      let bestIdx = 0
+      for (let i = 1; i < data.length; i++) {
+        if (data[i] > data[bestIdx]) bestIdx = i
+      }
+      return { label: LABELS[bestIdx], confidence: data[bestIdx] }
+    })
+
+    setPrediction({ label, confidence })
+  }, [captureGuide])
+
+  // Main loop: throttled predictions while the camera is running.
+  const loop = useCallback(() => {
+    const now = performance.now()
+    if (now - lastPredictRef.current >= PREDICT_INTERVAL_MS) {
+      lastPredictRef.current = now
+      runPrediction()
+    }
+    rafRef.current = requestAnimationFrame(loop)
+  }, [runPrediction])
+
+  const startCamera = useCallback(async () => {
+    try {
+      setStatusMsg('Requesting camera…')
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: 640, height: 480 },
+        audio: false,
+      })
+      const video = videoRef.current
+      video.srcObject = stream
+      await video.play()
+      setStatus('running')
+      setStatusMsg('Point the box at a Pokémon!')
+      lastPredictRef.current = 0
+      rafRef.current = requestAnimationFrame(loop)
+    } catch (err) {
+      console.error(err)
+      setStatus('error')
+      setStatusMsg('Could not access the camera. Please grant permission.')
+    }
+  }, [loop])
+
+  const stopCamera = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
+    const video = videoRef.current
+    const stream = video?.srcObject
+    if (stream) stream.getTracks().forEach((t) => t.stop())
+    if (video) video.srcObject = null
+    setStatus('ready')
+    setStatusMsg('Camera stopped.')
+    setPrediction(null)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      const stream = videoRef.current?.srcObject
+      if (stream) stream.getTracks().forEach((t) => t.stop())
+    }
+  }, [])
+
+  const isConfident = prediction && prediction.confidence >= threshold
+  const shownSprite = isConfident ? prediction.label : UNKNOWN_SPRITE
+  const shownName = isConfident ? prettyName(prediction.label) : '???'
+  const running = status === 'running'
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div className="app">
+      <header className="app__header">
+        <h1 className="app__title">Who&apos;s That Pokémon?</h1>
+        <p className="app__subtitle">
+          Powered by a MobileNetV2 CNN running live in your browser with
+          TensorFlow.js
+        </p>
+      </header>
 
-      <div className="ticks"></div>
+      <main className="stage">
+        <section className="camera-card">
+          <div className="camera-frame">
+            <video
+              ref={videoRef}
+              className="camera-frame__video"
+              playsInline
+              muted
+            />
+            {!running && (
+              <div className="camera-frame__placeholder">
+                {status === 'loading'
+                  ? 'Loading model…'
+                  : 'Camera is off'}
+              </div>
+            )}
+            <div
+              className={`guide ${running ? 'guide--active' : ''}`}
+              style={{ '--guide-frac': GUIDE_FRAC }}
+            >
+              <span className="guide__corner guide__corner--tl" />
+              <span className="guide__corner guide__corner--tr" />
+              <span className="guide__corner guide__corner--bl" />
+              <span className="guide__corner guide__corner--br" />
+            </div>
+          </div>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+          <div className="controls">
+            {!running ? (
+              <button
+                className="btn btn--primary"
+                onClick={startCamera}
+                disabled={status === 'loading' || status === 'error'}
+              >
+                Start Camera
+              </button>
+            ) : (
+              <button className="btn" onClick={stopCamera}>
+                Stop Camera
+              </button>
+            )}
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+            <label className="threshold">
+              <span>
+                Confidence threshold: {Math.round(threshold * 100)}%
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={threshold}
+                onChange={(e) => setThreshold(Number(e.target.value))}
+              />
+            </label>
+          </div>
+
+          <p className="status">{statusMsg}</p>
+        </section>
+
+        <section className="result-card">
+          <div className={`silhouette ${isConfident ? 'silhouette--revealed' : ''}`}>
+            <img
+              key={shownSprite}
+              src={spriteUrl(shownSprite)}
+              alt={shownName}
+              className="silhouette__img"
+            />
+          </div>
+          <h2 className="result-card__name">{shownName}</h2>
+
+          {prediction ? (
+            <div className="confidence">
+              <div className="confidence__bar">
+                <div
+                  className={`confidence__fill ${
+                    isConfident ? 'confidence__fill--ok' : 'confidence__fill--low'
+                  }`}
+                  style={{ width: `${Math.round(prediction.confidence * 100)}%` }}
+                />
+              </div>
+              <span className="confidence__label">
+                {prettyName(prediction.label)} ·{' '}
+                {Math.round(prediction.confidence * 100)}%
+              </span>
+            </div>
+          ) : (
+            <p className="result-card__hint">
+              {running
+                ? 'Analyzing…'
+                : 'Start the camera to reveal a Pokémon.'}
+            </p>
+          )}
+        </section>
+      </main>
+
+      {/* Offscreen canvas used to feed the model. */}
+      <canvas
+        ref={captureCanvasRef}
+        width={INPUT_SIZE}
+        height={INPUT_SIZE}
+        style={{ display: 'none' }}
+      />
+    </div>
   )
 }
 
