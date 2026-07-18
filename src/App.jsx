@@ -5,13 +5,12 @@ import './App.css'
 
 const MODEL_URL = '/model/my-model/model.json'
 const INPUT_SIZE = 224
-// Fraction of the (square) camera frame captured by the guide box.
 const GUIDE_FRAC = 0.5
-// Horizontal offset of the guide box, as a fraction of the frame, toward the
-// right of the screen. Keeps subjects away from background clutter.
 const GUIDE_OFFSET_X = 0.12
-// How often we ask the model for a prediction.
 const PREDICT_INTERVAL_MS = 350
+const STABILITY_WINDOW = 5
+const STABILITY_REQUIRED = 3
+const HYSTERESIS = 0.05
 
 const spriteUrl = (name) => `/pokemon/${name}.png`
 const prettyName = (name) =>
@@ -20,19 +19,76 @@ const prettyName = (name) =>
     .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
     .join(' ')
 
+function topTwo(probs) {
+  let bestIdx = 0
+  let secondIdx = 1
+  if (probs[1] > probs[0]) {
+    bestIdx = 1
+    secondIdx = 0
+  }
+  for (let i = 2; i < probs.length; i++) {
+    if (probs[i] > probs[bestIdx]) {
+      secondIdx = bestIdx
+      bestIdx = i
+    } else if (probs[i] > probs[secondIdx]) {
+      secondIdx = i
+    }
+  }
+  return { bestIdx, secondIdx }
+}
+
+function stableLabel(recentLabels) {
+  const counts = new Map()
+  for (const label of recentLabels) {
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+  let winner = recentLabels[recentLabels.length - 1]
+  let bestCount = 0
+  for (const [label, count] of counts) {
+    if (count > bestCount) {
+      bestCount = count
+      winner = label
+    }
+  }
+  return bestCount >= STABILITY_REQUIRED ? winner : null
+}
+
+function passesThresholds(confidence, margin, thresholds, wasConfident) {
+  const { confidenceMin, marginMin } = thresholds
+  if (wasConfident) {
+    return (
+      confidence >= confidenceMin - HYSTERESIS &&
+      margin >= marginMin - HYSTERESIS
+    )
+  }
+  return (
+    confidence >= confidenceMin + HYSTERESIS &&
+    margin >= marginMin + HYSTERESIS
+  )
+}
+
 function App() {
   const videoRef = useRef(null)
   const captureCanvasRef = useRef(null)
   const modelRef = useRef(null)
   const rafRef = useRef(null)
   const lastPredictRef = useRef(0)
+  const labelHistoryRef = useRef([])
+  const wasConfidentRef = useRef(false)
+  const displayedRef = useRef(null)
+  const confidenceMinRef = useRef(0.6)
+  const marginMinRef = useRef(0.15)
 
-  const [status, setStatus] = useState('loading') // loading | ready | running | error
+  const [status, setStatus] = useState('loading')
   const [statusMsg, setStatusMsg] = useState('Loading model…')
-  const [threshold, setThreshold] = useState(0.6)
-  const [prediction, setPrediction] = useState(null) // { label, confidence }
+  const [confidenceMin, setConfidenceMin] = useState(0.6)
+  const [marginMin, setMarginMin] = useState(0.15)
+  const [prediction, setPrediction] = useState(null)
+  const [isConfident, setIsConfident] = useState(false)
 
-  // Load the TensorFlow.js graph model once.
+  confidenceMinRef.current = confidenceMin
+  marginMinRef.current = marginMin
+
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -41,7 +97,6 @@ function App() {
         const model = await tf.loadGraphModel(MODEL_URL)
         if (cancelled) return
         modelRef.current = model
-        // Warm up so the first real prediction isn't slow.
         tf.tidy(() => {
           const warm = model.predict(tf.zeros([1, INPUT_SIZE, INPUT_SIZE, 3]))
           if (Array.isArray(warm)) warm.forEach((t) => t.dataSync())
@@ -60,10 +115,6 @@ function App() {
     }
   }, [])
 
-  // Draw the guide square of the current video frame into a 224x224 canvas.
-  // Uses cover-crop math so the captured region matches the on-screen box.
-  // The video is displayed mirrored (scaleX(-1)), so a rightward on-screen
-  // offset maps to a leftward offset in the raw source frame.
   const captureGuide = useCallback(() => {
     const video = videoRef.current
     const canvas = captureCanvasRef.current
@@ -75,7 +126,6 @@ function App() {
 
     const m = Math.min(vw, vh)
     const side = m * GUIDE_FRAC
-    // Mirror flips X: on-screen right offset -> subtract in source space.
     let sx = vw / 2 - GUIDE_OFFSET_X * m - side / 2
     let sy = (vh - side) / 2
     sx = Math.max(0, Math.min(sx, vw - side))
@@ -91,9 +141,7 @@ function App() {
     const canvas = captureGuide()
     if (!model || !canvas) return
 
-    const { label, confidence } = tf.tidy(() => {
-      // The model's baked-in Rescaling layer is (x * 2 - 1), which expects
-      // [0,1] input and maps it to [-1,1]. So normalize pixels to [0,1] here.
+    const raw = tf.tidy(() => {
       const input = tf.browser
         .fromPixels(canvas)
         .toFloat()
@@ -102,17 +150,59 @@ function App() {
       const out = model.predict(input)
       const probs = Array.isArray(out) ? out[0] : out
       const data = probs.dataSync()
-      let bestIdx = 0
-      for (let i = 1; i < data.length; i++) {
-        if (data[i] > data[bestIdx]) bestIdx = i
+      const { bestIdx, secondIdx } = topTwo(data)
+      const confidence = data[bestIdx]
+      const secondConfidence = data[secondIdx]
+      return {
+        label: LABELS[bestIdx],
+        confidence,
+        secondConfidence,
+        margin: confidence - secondConfidence,
       }
-      return { label: LABELS[bestIdx], confidence: data[bestIdx] }
     })
 
-    setPrediction({ label, confidence })
+    labelHistoryRef.current = [
+      ...labelHistoryRef.current.slice(-(STABILITY_WINDOW - 1)),
+      raw.label,
+    ]
+    const smoothedLabel =
+      stableLabel(labelHistoryRef.current) ??
+      displayedRef.current?.label ??
+      raw.label
+
+    const confident = passesThresholds(
+      raw.confidence,
+      raw.margin,
+      {
+        confidenceMin: confidenceMinRef.current,
+        marginMin: marginMinRef.current,
+      },
+      wasConfidentRef.current,
+    )
+    wasConfidentRef.current = confident
+
+    const next = {
+      label: smoothedLabel,
+      confidence: raw.confidence,
+      secondConfidence: raw.secondConfidence,
+      margin: raw.margin,
+    }
+
+    const prev = displayedRef.current
+    const changed =
+      !prev ||
+      prev.label !== next.label ||
+      prev.confidence !== next.confidence ||
+      prev.margin !== next.margin ||
+      prev.confident !== confident
+
+    if (changed) {
+      displayedRef.current = { ...next, confident }
+      setPrediction(next)
+      setIsConfident(confident)
+    }
   }, [captureGuide])
 
-  // Main loop: throttled predictions while the camera is running.
   const loop = useCallback(() => {
     const now = performance.now()
     if (now - lastPredictRef.current >= PREDICT_INTERVAL_MS) {
@@ -121,6 +211,14 @@ function App() {
     }
     rafRef.current = requestAnimationFrame(loop)
   }, [runPrediction])
+
+  const resetPredictionState = useCallback(() => {
+    labelHistoryRef.current = []
+    wasConfidentRef.current = false
+    displayedRef.current = null
+    setPrediction(null)
+    setIsConfident(false)
+  }, [])
 
   const startCamera = useCallback(async () => {
     try {
@@ -132,8 +230,9 @@ function App() {
       const video = videoRef.current
       video.srcObject = stream
       await video.play()
+      resetPredictionState()
       setStatus('running')
-      setStatusMsg('Point the box at a Pokémon!')
+      setStatusMsg('Fill the yellow box with one Pokémon!')
       lastPredictRef.current = 0
       rafRef.current = requestAnimationFrame(loop)
     } catch (err) {
@@ -141,7 +240,7 @@ function App() {
       setStatus('error')
       setStatusMsg('Could not access the camera. Please grant permission.')
     }
-  }, [loop])
+  }, [loop, resetPredictionState])
 
   const stopCamera = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current)
@@ -150,10 +249,10 @@ function App() {
     const stream = video?.srcObject
     if (stream) stream.getTracks().forEach((t) => t.stop())
     if (video) video.srcObject = null
+    resetPredictionState()
     setStatus('ready')
     setStatusMsg('Camera stopped.')
-    setPrediction(null)
-  }, [])
+  }, [resetPredictionState])
 
   useEffect(() => {
     return () => {
@@ -163,11 +262,12 @@ function App() {
     }
   }, [])
 
-  const isConfident = prediction && prediction.confidence >= threshold
-  const shownSprite = isConfident ? prediction.label : UNKNOWN_SPRITE
-  const shownName = isConfident ? prettyName(prediction.label) : 'Unknown'
-  // Reveal the sprite in full color once we have a prediction (confident
-  // Pokémon or the Unown "unknown" fallback); stay a silhouette while idle.
+  const shownSprite = isConfident && prediction ? prediction.label : UNKNOWN_SPRITE
+  const shownName = isConfident && prediction
+    ? prettyName(prediction.label)
+    : prediction
+      ? 'Unknown'
+      : '—'
   const revealed = Boolean(prediction)
   const running = status === 'running'
 
@@ -178,6 +278,10 @@ function App() {
         <p className="app__subtitle">
           Powered by a MobileNetV2 CNN running live in your browser with
           TensorFlow.js
+        </p>
+        <p className="app__instructions">
+          Fill the yellow guide box with a single Pokémon toy, card, or screen.
+          Keep the background out of the box for the best results.
         </p>
       </header>
 
@@ -211,6 +315,17 @@ function App() {
                 <span className="guide__corner guide__corner--br" />
               </div>
             )}
+            {running && (
+              <div className="model-preview" aria-label="Model input preview">
+                <span className="model-preview__label">Model input</span>
+                <canvas
+                  ref={captureCanvasRef}
+                  width={INPUT_SIZE}
+                  height={INPUT_SIZE}
+                  className="model-preview__canvas"
+                />
+              </div>
+            )}
           </div>
 
           <div className="controls">
@@ -230,15 +345,29 @@ function App() {
 
             <label className="threshold">
               <span>
-                Confidence threshold: {Math.round(threshold * 100)}%
+                Min confidence: {Math.round(confidenceMin * 100)}%
               </span>
               <input
                 type="range"
                 min="0"
                 max="1"
                 step="0.05"
-                value={threshold}
-                onChange={(e) => setThreshold(Number(e.target.value))}
+                value={confidenceMin}
+                onChange={(e) => setConfidenceMin(Number(e.target.value))}
+              />
+            </label>
+
+            <label className="threshold">
+              <span>
+                Min margin: {Math.round(marginMin * 100)}%
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="0.5"
+                step="0.01"
+                value={marginMin}
+                onChange={(e) => setMarginMin(Number(e.target.value))}
               />
             </label>
           </div>
@@ -255,7 +384,9 @@ function App() {
               className="silhouette__img"
             />
           </div>
-          <h2 className="result-card__name">{shownName}</h2>
+          <h2 className="result-card__name" aria-live="polite">
+            {shownName}
+          </h2>
 
           {prediction ? (
             <div className="confidence">
@@ -269,7 +400,8 @@ function App() {
               </div>
               <span className="confidence__label">
                 {prettyName(prediction.label)} ·{' '}
-                {Math.round(prediction.confidence * 100)}%
+                {Math.round(prediction.confidence * 100)}% top ·{' '}
+                {Math.round(prediction.margin * 100)}% margin
               </span>
             </div>
           ) : (
@@ -282,13 +414,15 @@ function App() {
         </section>
       </main>
 
-      {/* Offscreen canvas used to feed the model. */}
-      <canvas
-        ref={captureCanvasRef}
-        width={INPUT_SIZE}
-        height={INPUT_SIZE}
-        style={{ display: 'none' }}
-      />
+      {!running && (
+        <canvas
+          ref={captureCanvasRef}
+          width={INPUT_SIZE}
+          height={INPUT_SIZE}
+          style={{ display: 'none' }}
+          aria-hidden="true"
+        />
+      )}
     </div>
   )
 }

@@ -29,6 +29,14 @@
   font-size: 0.95rem;
 }
 
+.app__instructions {
+  margin: 1rem auto 0;
+  max-width: 42ch;
+  font-size: 0.9rem;
+  color: #c5d0ef;
+  line-height: 1.5;
+}
+
 .stage {
   display: grid;
   grid-template-columns: 1fr;
@@ -107,6 +115,34 @@
 .guide__corner--tr { top: -3px; right: -3px; border-left: none; border-bottom: none; border-top-right-radius: 8px; }
 .guide__corner--bl { bottom: -3px; left: -3px; border-right: none; border-top: none; border-bottom-left-radius: 8px; }
 .guide__corner--br { bottom: -3px; right: -3px; border-left: none; border-top: none; border-bottom-right-radius: 8px; }
+
+.model-preview {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  background: rgba(0, 0, 0, 0.75);
+  border: 1px solid rgba(255, 203, 5, 0.5);
+  border-radius: 8px;
+  padding: 6px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.model-preview__label {
+  display: block;
+  font-size: 0.65rem;
+  color: #ffcb05;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.model-preview__canvas {
+  display: block;
+  width: 80px;
+  height: 80px;
+  image-rendering: pixelated;
+}
 
 /* ---------- Controls ---------- */
 .controls {
