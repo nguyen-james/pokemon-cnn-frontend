@@ -197,18 +197,20 @@ function App() {
                   : 'Camera is off'}
               </div>
             )}
-            <div
-              className={`guide ${running ? 'guide--active' : ''}`}
-              style={{
-                '--guide-frac': GUIDE_FRAC,
-                '--guide-offset-x': GUIDE_OFFSET_X,
-              }}
-            >
-              <span className="guide__corner guide__corner--tl" />
-              <span className="guide__corner guide__corner--tr" />
-              <span className="guide__corner guide__corner--bl" />
-              <span className="guide__corner guide__corner--br" />
-            </div>
+            {running && (
+              <div
+                className="guide guide--active"
+                style={{
+                  '--guide-frac': GUIDE_FRAC,
+                  '--guide-offset-x': GUIDE_OFFSET_X,
+                }}
+              >
+                <span className="guide__corner guide__corner--tl" />
+                <span className="guide__corner guide__corner--tr" />
+                <span className="guide__corner guide__corner--bl" />
+                <span className="guide__corner guide__corner--br" />
+              </div>
+            )}
           </div>
 
           <div className="controls">
