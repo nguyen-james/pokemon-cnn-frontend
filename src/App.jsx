@@ -83,10 +83,12 @@ function App() {
     if (!model || !canvas) return
 
     const { label, confidence } = tf.tidy(() => {
-      // Model has a Rescaling layer baked in, so feed raw 0–255 pixels.
+      // The model's baked-in Rescaling layer is (x * 2 - 1), which expects
+      // [0,1] input and maps it to [-1,1]. So normalize pixels to [0,1] here.
       const input = tf.browser
         .fromPixels(canvas)
         .toFloat()
+        .div(255)
         .expandDims(0)
       const out = model.predict(input)
       const probs = Array.isArray(out) ? out[0] : out
