@@ -165,7 +165,10 @@ function App() {
 
   const isConfident = prediction && prediction.confidence >= threshold
   const shownSprite = isConfident ? prediction.label : UNKNOWN_SPRITE
-  const shownName = isConfident ? prettyName(prediction.label) : '???'
+  const shownName = isConfident ? prettyName(prediction.label) : 'Unknown'
+  // Reveal the sprite in full color once we have a prediction (confident
+  // Pokémon or the Unown "unknown" fallback); stay a silhouette while idle.
+  const revealed = Boolean(prediction)
   const running = status === 'running'
 
   return (
@@ -242,7 +245,7 @@ function App() {
         </section>
 
         <section className="result-card">
-          <div className={`silhouette ${isConfident ? 'silhouette--revealed' : ''}`}>
+          <div className={`silhouette ${revealed ? 'silhouette--revealed' : ''}`}>
             <img
               key={shownSprite}
               src={spriteUrl(shownSprite)}
