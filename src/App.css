@@ -83,7 +83,7 @@
 .guide {
   position: absolute;
   top: 50%;
-  left: 50%;
+  left: calc(50% + var(--guide-offset-x, 0) * 100%);
   width: calc(var(--guide-frac, 0.75) * 100%);
   height: calc(var(--guide-frac, 0.75) * 100%);
   transform: translate(-50%, -50%);

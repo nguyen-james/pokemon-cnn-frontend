@@ -6,7 +6,10 @@ import './App.css'
 const MODEL_URL = '/model/my-model/model.json'
 const INPUT_SIZE = 224
 // Fraction of the (square) camera frame captured by the guide box.
-const GUIDE_FRAC = 0.75
+const GUIDE_FRAC = 0.5
+// Horizontal offset of the guide box, as a fraction of the frame, toward the
+// right of the screen. Keeps subjects away from background clutter.
+const GUIDE_OFFSET_X = 0.12
 // How often we ask the model for a prediction.
 const PREDICT_INTERVAL_MS = 350
 
@@ -57,8 +60,10 @@ function App() {
     }
   }, [])
 
-  // Draw the centered guide square of the current video frame into a 224x224
-  // canvas (cover-crop math so it matches the on-screen guide box).
+  // Draw the guide square of the current video frame into a 224x224 canvas.
+  // Uses cover-crop math so the captured region matches the on-screen box.
+  // The video is displayed mirrored (scaleX(-1)), so a rightward on-screen
+  // offset maps to a leftward offset in the raw source frame.
   const captureGuide = useCallback(() => {
     const video = videoRef.current
     const canvas = captureCanvasRef.current
@@ -68,9 +73,13 @@ function App() {
     const vh = video.videoHeight
     if (!vw || !vh) return null
 
-    const side = Math.min(vw, vh) * GUIDE_FRAC
-    const sx = (vw - side) / 2
-    const sy = (vh - side) / 2
+    const m = Math.min(vw, vh)
+    const side = m * GUIDE_FRAC
+    // Mirror flips X: on-screen right offset -> subtract in source space.
+    let sx = vw / 2 - GUIDE_OFFSET_X * m - side / 2
+    let sy = (vh - side) / 2
+    sx = Math.max(0, Math.min(sx, vw - side))
+    sy = Math.max(0, Math.min(sy, vh - side))
 
     const ctx = canvas.getContext('2d')
     ctx.drawImage(video, sx, sy, side, side, 0, 0, INPUT_SIZE, INPUT_SIZE)
@@ -187,7 +196,10 @@ function App() {
             )}
             <div
               className={`guide ${running ? 'guide--active' : ''}`}
-              style={{ '--guide-frac': GUIDE_FRAC }}
+              style={{
+                '--guide-frac': GUIDE_FRAC,
+                '--guide-offset-x': GUIDE_OFFSET_X,
+              }}
             >
               <span className="guide__corner guide__corner--tl" />
               <span className="guide__corner guide__corner--tr" />
